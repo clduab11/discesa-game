@@ -77,6 +77,23 @@ public class GameManager : MonoBehaviour
     void BuildArena()
     {
         ArenaBuilder.Build(Vector3.zero, 40f, 20f, 40f);
+        BuildTrialProp();
+    }
+
+    /// <summary>
+    /// SimReady GLB trial prop (CC-BY-4.0, credit NVIDIA): a single white crate
+    /// as non-gameplay set dressing on the arena floor, out of the ship's spawn
+    /// lane. Gameplay collision is unchanged; the prop is visual-only.
+    /// </summary>
+    void BuildTrialProp()
+    {
+        var prop = SimReadyPropLoader.TryInstantiate();
+        if (prop != null)
+        {
+            prop.transform.position = new Vector3(0f, -9.2f, -12f);
+            prop.transform.rotation = Quaternion.Euler(0f, 35f, 0f);
+        }
+        // If the dataset file has not been downloaded, the arena stays clean.
     }
 
     void BuildShip()
@@ -84,24 +101,32 @@ public class GameManager : MonoBehaviour
         var shipGO = new GameObject("Ship");
         shipGO.transform.SetPositionAndRotation(new Vector3(-14f, 0f, 0f), Quaternion.identity);
 
-        var hull = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        hull.name = "Hull";
-        hull.transform.SetParent(shipGO.transform, false);
-        hull.transform.localScale = new Vector3(0.7f, 0.45f, 1.3f);
+        // Authored ship visual (Blender GLB). The swept kinematic controller owns
+        // collision; the imported mesh is visual-only (colliders stripped).
+        var visual = ShipVisualLoader.TryInstantiate(shipGO.transform);
+        if (visual == null)
+        {
+            // Fallback graybox primitives when the GLB asset has not been imported
+            // yet (fresh checkout, or Editor not yet refreshed). Same envelope.
+            var hull = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            hull.name = "Hull";
+            hull.transform.SetParent(shipGO.transform, false);
+            hull.transform.localScale = new Vector3(0.7f, 0.45f, 1.3f);
 
-        var canopy = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        canopy.name = "Canopy";
-        canopy.transform.SetParent(shipGO.transform, false);
-        canopy.transform.localPosition = new Vector3(0f, 0.16f, 0.15f);
-        canopy.transform.localScale = new Vector3(0.5f, 0.4f, 0.55f);
+            var canopy = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+            canopy.name = "Canopy";
+            canopy.transform.SetParent(shipGO.transform, false);
+            canopy.transform.localPosition = new Vector3(0f, 0.16f, 0.15f);
+            canopy.transform.localScale = new Vector3(0.5f, 0.4f, 0.55f);
 
-        var shipMat = DiscesaMaterials.ShipHull;
-        hull.GetComponent<Renderer>().sharedMaterial = shipMat;
-        canopy.GetComponent<Renderer>().sharedMaterial = shipMat;
+            var shipMat = DiscesaMaterials.ShipHull;
+            hull.GetComponent<Renderer>().sharedMaterial = shipMat;
+            canopy.GetComponent<Renderer>().sharedMaterial = shipMat;
 
-        // Child primitives would add their own colliders and fight the swept controller.
-        Object.Destroy(hull.GetComponent<Collider>());
-        Object.Destroy(canopy.GetComponent<Collider>());
+            // Child primitives would add their own colliders and fight the swept controller.
+            Object.Destroy(hull.GetComponent<Collider>());
+            Object.Destroy(canopy.GetComponent<Collider>());
+        }
 
         // One sphere collider so incoming projectiles can register hits. It is a trigger
         // because the ship's own swept move must not collide with itself (casts ignore triggers).

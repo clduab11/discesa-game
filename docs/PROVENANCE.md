@@ -7,8 +7,11 @@
 - REA (MIT) not installed/used — source answered behavioral questions. BLA (MIT) not used; deferred until a working prototype (this slice now exists).
 
 ## Assets in this repo
-- Unity primitives (Box, Sphere, Cylinder) instanced at runtime with URP Lit materials — no external assets in slice 1.
+- Unity primitives (Box, Sphere, Cylinder) instanced at runtime with URP Lit materials — slice 1 baseline, still the fallback.
 - HUD: UnityEngine.UI text — original.
+- **Original authored ship (2026-11-08)**: `ship_graybox_v1.glb` + source script `Assets/Art/Source/Blender/make_ship_graybox_v1.py` (+ `.blend`). Generated with Blender 5.2.1 LTS (`C:\Program Files\Blender Foundation\Blender 5.2\blender.exe --background --factory-startup --python ...`). Original low-poly design (hull, nose, canopy, wings, engine, glow strip, twin guns) in the ~0.7×0.45×1.3 m envelope. No external reference art. License: original, this repo. Attribution: none required.
+- **SimReady trial prop (2026-11-08)**: `simready_crate_trial.glb` (335,036 B), file `glb/crate_white_a14.glb` from HF dataset `codepawl/simready-glb`, https://huggingface.co/datasets/codepawl/simready-glb . License **CC-BY-4.0**. Attribution required: "Models by NVIDIA SimReady, licensed CC BY 4.0. This dataset converts and compresses them. Credited to NVIDIA as original author; source dataset: https://huggingface.co/datasets/codepawl/simready-glb". What was used: single white crate, mesh patch `EXT_meshopt_compression` + `EXT_texture_webp`. Local paths: `Assets/Art/Models/simready_crate_trial.glb` (source) and `Assets/Resources/Discesa/simready_crate_trial.glb` (runtime copy via `DiscesaAssetWire.Wire`). Downloaded with `hf cp hf://datasets/codepawl/simready-glb/glb/crate_white_a14.glb`. No other dataset files used.
+- **GLTFast package**: `com.unity.cloud.gltfast 6.17.0` (Unity glTFast, Apache-2.0), added in `Packages/manifest.json`, provides the `.glb` ScriptedImporter. Verified to resolve and compile under Unity 6000.6.0f1. Versions `6.21.0`/`6.22.0` were tried first and the registry returned "cannot be found" — `6.17.0` is the last resolvable version.
 
 ## Future assets (HF dataset annex, rev 2)
 | Dataset | License (verified 2026-11-07) | Use |

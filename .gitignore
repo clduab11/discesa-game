@@ -43,3 +43,5 @@ Thumbs.db
 
 # Local logs and evidence kept out of VCS except committed reports
 /glb_logs/
+# Human screenshot evidence (local only)
+/Screenshots/
