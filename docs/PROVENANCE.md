@@ -1,7 +1,8 @@
 # Provenance
 
 ## Reference code (study only, nothing copied into this repo)
-- Descent 1 source release `videogamepreservation/descent`, pinned commit `f6fb1c30a06725b403dfa7db4b251ecea1c3efc1`.
+- Descent 1 source release: https://github.com/videogamepreservation/descent , pinned commit `f6fb1c30a06725b403dfa7db4b251ecea1c3efc1`.
+- The pinned study copy is **not vendored and not committed**. Optional local checkout: `pwsh -File tools/fetch-reference.ps1` writes to gitignored `reference/descent/`. See `docs/REFERENCE.md` for the full file-by-file study record.
 - License (README.TXT): © Parallax Software 1993–1998. Royalty-free perpetual license for noncommercial, royalty/revenue-free use only. Revenue-bearing use prohibited.
 - Usage: behavioral study of `PHYSICS.C` (`do_physics_sim` 1/64s substeps, drag-before-move, sweep-slide), `CONTROLS.C` (`read_flying_controls` fvec/rvec/uvec composite), `OBJECT.H` (`physics_info` schema). All movement code in `Assets/Scripts/Discesa/ShipController.cs` is original rewritten code; no Parallax code, names, art, music, levels, or branding included.
 - REA (MIT) not installed/used — source answered behavioral questions. BLA (MIT) not used; deferred until a working prototype (this slice now exists).
@@ -28,3 +29,67 @@
 | azyg0s/pixelart-172k + -50m | MIT | MIT CPU icon generation |
 | sprited/sprite-dx-data | **no license = unlicensed** | excluded from use |
 | Fraser/pico-8-games | CC-BY-NC-SA 4.0 | study only |
+
+## Procedural art added for the M0–M5 slice (2026-11-08)
+
+- **Textures** — `Assets/Art/GeneratedFallback/Textures/` (`wall_panel`, `floor_grate`,
+  `ceiling_panel`, `hazard_stripe`, `metal_trim`, `core_trim`, `prop_metal`). Generated
+  deterministically by `Assets/Scripts/Discesa/Editor/ProceduralTextureBaker.cs` from code
+  only; no photographs, no third-party textures, no AI generation. Original to this repo.
+- **Materials** — `Assets/Resources/Discesa/*.mat`, baked by
+  `Assets/Scripts/Discesa/Editor/MaterialBaker.cs`. Kept under `Resources` so the built
+  player does not depend on `Shader.Find` for stripped URP shaders. Original palette.
+- **HUD sprites** — generated at runtime by `Assets/Scripts/Discesa/HudArt.cs` (panels,
+  brackets, weapon icons, portrait). Original.
+- **Sound** — none in this slice.
+
+## AI-generation ledger
+
+- Unity AI credits authorised: 1,000 (soft cap 800). **Spent: 0.** No texture, mesh, audio
+  or code was generated through Unity AI for this slice.
+- `GeneratedAssets/` stays gitignored; any future AI output is promoted by hand into
+  `Assets/Art/Generated/` with a row in this file. Nothing has been promoted yet.
+- The reference study remains behavioural only. `descent-master/` (a local unpacked copy
+  of the pinned source) and `reference/descent/` (the opt-in script checkout) are both
+  gitignored and are not part of the build or the repository history.
+- All runtime movement, combat, HUD, arena and capture code under `Assets/Scripts/Discesa/`
+  is original C# written for this project. No Parallax code, names, level data, art,
+  music or branding is present.
+
+## Vendored third-party code (2026-11-08)
+
+- **`tools/blender-lpm/`** — Blender Low Poly Modelling Skill.
+  - Source: https://github.com/ozanzeng/blender-LPM-skill
+  - Pinned commit: `687d0a46f1280bc7d11dbf83539840100ec909dc`
+  - Licence: MIT, © 2026 Ozan Zengin (full text kept at `tools/blender-lpm/LICENSE`).
+  - Vendored subset: `SKILL.md`, `references/` (budgets, Unity export contract, QA checklist,
+    recipes), and the deterministic local scripts (`lpm.py`, `lpm_kit.py`, `bl.py`,
+    `render_views.py`, `inspect_scene.py`, `gate_report.py`, `beauty_render.py`,
+    `compare_silhouette.py`, `asset_card.py`) plus two recipes as patterns.
+  - Deliberately **not** vendored: every script that calls fal.ai, Hunyuan weights, or needs
+    reference turnarounds (`make_turnaround.py`, `multiview_to_mesh.py`, `hy3d_local_mv.py`,
+    `bake_registered.py`, `project_views_bake.py`, `atlas_from_views.py`, `register_views.py`,
+    `shape_from_views.py`, `score_views.py`, `find_view.py`, `calibrate_elevation.py`,
+    `gen_to_lowpoly.py`, `hull_*.py`, `render_n_views.py`, `render_ref_views.py`,
+    `render_unlit_views.py`, `pbr_from_basecolor.py`, `wire_pbr_export.py`, `turntable.py`).
+    Those either cost money or need assets we have not made.
+  - Modifications: none to the scripts. Our recipes live outside the vendored tree.
+  - Why: it produces Unity-axis FBX with a mask map, enforces a triangle budget, and emits a
+    PASS/FAIL gate report — the same "prove it" discipline the rest of this repo uses.
+
+## Reference images (Venice.ai)
+
+- Venice.ai is used **only** to generate concept art and orthographic turnarounds that feed a
+  Blender recipe. Reference images are inputs, never shipped assets.
+- API docs and model prices read 2026-11-08: `docs/REFERENCE_IMAGES.md` records the model IDs,
+  seed and payload for each brief.
+- Any generated reference must get a row here: brief, model ID, seed, cost, and the asset it fed.
+  **None generated yet.**
+- API keys stay in Chris's environment; never in the repo, a prompt or a log.
+
+## Unity AI
+
+- Credits: 1,000 authorised, 800 soft cap. **Spent: 0.** Plan and per-spend ledger live in
+  `docs/UNITY_AI_PLAN.md` and `docs/CREDIT_LEDGER.md`.
+- Policy: no 3D model generation credits (Blender LPM is free, gated and deterministic); no
+  Unity Ultra model without a documented double failure on Lite and Default.

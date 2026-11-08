@@ -45,3 +45,14 @@ Thumbs.db
 /glb_logs/
 # Human screenshot evidence (local only)
 /Screenshots/
+# Opt-in third-party study checkout (see docs/REFERENCE.md); never committed
+/reference/
+/descent-master/
+# Unity AI raw generation output (promoted copies live under Assets/Art/Generated)
+/GeneratedAssets/
+
+# Local build output and Blender scratch
+/Build/
+/Builds/
+/_work/
+
