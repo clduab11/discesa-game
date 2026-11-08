@@ -113,6 +113,57 @@ Research method: HF Hub search (tags `sprites`, `3d`, `pixel-art`, `game-assets`
 4. CC-BY-SA (LPC) and NC items are reference-only. No scraping/training on sprite datasets; the only ML-generation experiments permitted are `pixelart-50m` (MIT, CPU icons) and TripoSR (MIT, one mesh), both offline/local, no paid services, no uploads.
 5. AI-generated CC0 with unreviewed captions (Pixel Art Atlas) — treat captions as unverified; any shipped icon must pass human review.
 
+## 5b. Blender-native and rigged asset survey (2026-11-08)
+
+Question asked: are there Blender models / `.blend` datasets on HuggingFace or GitHub worth using?
+Method: HF Hub repo search (`blender`, `rigged`, `spacecraft`) plus GitHub repository search; every
+card below opened live. This does not replace the §5 annex, which covers GLB/USD prop sources.
+
+### Structural finding first
+
+The 3D asset ecosystem does **not** distribute `.blend`. Datasets standardise on **glTF/GLB**,
+with USD for simulation and FBX for legacy pipelines. Reasons: `.blend` is binary and
+version-locked, so it neither diffs nor batch-validates, and every consumer has to own Blender
+to use it. Only one surveyed set ships Blender files at all: `scenario-labs/3d-collection`
+(mixed GLB/FBX/Blend/VOX), already in §5.
+
+Consequence for Discesa: keep Blender as the **authoring** step and GLB as the **interchange**.
+That is already the pipeline (see `docs/PROVENANCE.md`, `make_ship_graybox_v1.py` → GLB →
+GLTFast). Hunting for `.blend` downloads would add a Blender-version dependency for no gain.
+
+### HuggingFace — rigged / animated
+
+| Dataset | License (verified) | Contents | Discesa verdict |
+|---|---|---|---|
+| `Linzhan/Objaverse-XL-Rigged-Animated` | `license:other` (per-object Objaverse licence) | Strict subset of Objaverse/XL where every file has a skeleton plus at least one animation clip; rigs 3–344 joints, characters and articulated rigid objects; GLB/glTF; 10.4K downloads, 1K–10K files | The best rigged set found. **Not needed now:** slice 1 has no humanoid or articulated enemy. Revisit if an animated enemy drones is added; per-object licence filter mandatory, no bulk pull |
+| `EntVista/metrixel-rigged-characters` | `license:other` | Small humanoid sample set, skeleton + weights + clip; published as sample content for their dataset toolchain | **Skip.** Wrong subject, vendor samples, "other" licence |
+| `aixk/baar3d-commercial-rigged-pbr` | **none** | Created 2026-11-08, 4 downloads, no card | **Untrusted.** Name claims "commercial"; no licence means no use |
+
+### HuggingFace — Blender tooling and benchmarks (not asset sources)
+
+| Dataset | License | Use |
+|---|---|---|
+| `Qwen/BlenderWorld` | MIT | 223 Blender 3D-creation tasks with a render-based evaluation protocol. Useful as a **quality reference** for "what good Blender output looks like", and as a possible mesh-QA harness later. Not an asset pack |
+| `DietCoke4671/BlenderBench` | CC-BY-4.0 | Blender scene-editing benchmark. Same verdict |
+| `yifanlu/Blender_3D_assets` | **none** | No licence metadata, unknown contents, 350 downloads. **Excluded** (matches the `sprited/sprite-dx-data` precedent) |
+
+### GitHub
+
+| Repo | Licence | What it actually is | Discesa verdict |
+|---|---|---|---|
+| `ToxSam/open-source-3D-assets` | CC0 registry (177 stars) | 991+ GLB models from metaverse projects, JSON database with links to permanent storage; medieval props, rooms, streets | Plausible **prop** source for arena dressing. Provenance is a chain of metaverse uploads, so verify each asset individually before shipping |
+| `ozanzeng/blender-LPM-skill` | see repo (25 stars) | Agent skill that builds flat-shaded, palette-textured, budgeted low-poly game assets in Blender from a one-line brief and exports **Unity-ready FBX** | **Directly relevant to our brief → mesh loop**; review before adopting. It is tooling, not art |
+| `Snodrod/AstraForge` | see repo (55 stars) | Local image/text → 3D → rig → animation → effects → Godot packages | Pipeline reference only; Godot-targeted and a heavy dependency |
+| `Sollumz`, `EagleDynamics/Blender-EDM-Exporter`, `HeitorSpectre/Telltale-D3DMesh-Editor`, `Joshimello/SnowbreakModel` | mixed | Format/modding tools and ripped game assets | **Out of scope.** The ripped-content repos are rights-hostile; do not use |
+
+### Conclusion for Discesa
+
+No dataset found supplies a spacecraft, a 6DoF arena, or a suitable enemy that beats modelling it.
+The high-value external 3D sources remain hard-surface **props** (`codepawl/simready-glb`, already
+trialled) and **original** Blender work. Rigged-character datasets only become relevant if the
+enemy design moves from a turret/drone to an animated creature, and that is out of scope for the
+first playable.
+
 ## 6. MCP / tooling plan
 
 - Kilo MCPs in use now: github, huggingface, deepwiki, context7, firecrawl (read-only research).
