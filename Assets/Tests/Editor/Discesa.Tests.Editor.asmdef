@@ -1,0 +1,1 @@
+{"name":"Discesa.Tests.Editor","references":["Discesa.Runtime"],"includePlatforms":["Editor"],"optionalUnityReferences":["TestAssemblies"]}
