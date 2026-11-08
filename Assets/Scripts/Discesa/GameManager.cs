@@ -61,6 +61,10 @@ public class GameManager : MonoBehaviour
         BuildTurret();
         BuildCamera();
         BuildHud();
+
+        Debug.Log($"[Discesa] Ready: ship at {ship.transform.position}, " +
+                  $"turret at {turret.transform.position} ({turret.hp} hp), " +
+                  $"camera {shipCamera.name}, arena 40x20x40");
     }
 
     void OnDestroy()
