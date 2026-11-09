@@ -12,8 +12,8 @@ public class ShipPhysicsTests
     [SetUp]
     public void Setup()
     {
-        // Arena so collision casts have something to hit.
-        ArenaBuilder.Build(Vector3.zero, 40f, 20f, 40f);
+        // Multi-room arena so collision casts have real walls to hit.
+        ArenaBuilder.Build(ArenaLayout.CreateDefault(), includeProps: false);
         _physics = ScriptableObject.CreateInstance<ShipPhysics>();
         _physics.mass = 100f; _physics.maxThrust = 1000f; _physics.drag = 2f;
         _physics.rotthrust = 2f; _physics.rollRate = 2f; _physics.rotDrag = 8f;
@@ -23,9 +23,8 @@ public class ShipPhysicsTests
         _ship = _go.AddComponent<ShipController>();
         _ship.physics = _physics;
         _ship.fixedDt = 1f / 64f;
-        _ship.ResetShip(new Vector3(-19f, 0, 0), Quaternion.identity);
-        _go.transform.position = new Vector3(-19f, 0, 0);
-        _go.transform.rotation = Quaternion.identity;
+        // Core Chamber gives a long clear run down +X for the terminal-velocity test.
+        _ship.ResetShip(new Vector3(19f, 0f, 8f), Quaternion.Euler(0f, 90f, 0f));
     }
 
     [TearDown]

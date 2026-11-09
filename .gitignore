@@ -56,3 +56,8 @@ Thumbs.db
 /Builds/
 /_work/
 
+
+# Unity play-mode test runner leftovers (regenerated per session)
+Assets/InitTestScene*.unity
+Assets/InitTestScene*.unity.meta
+test-results.xml

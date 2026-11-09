@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using UnityEngine;
 
 /// <summary>
@@ -21,8 +21,10 @@ public class ShipController : MonoBehaviour
     [Tooltip("Fixed integration step. 1/64 s mirrors the reference's fixed-step structure.")]
     public float fixedDt = 1f / 64f;
 
-    [Tooltip("Half-extents of the enclosed arena the ship is clamped inside.")]
-    public Vector3 arenaHalfExtents = new Vector3(20f, 10f, 20f);
+    [System.NonSerialized]
+    [Tooltip("Union-of-volumes containment net. Walls stay authoritative; this catches escapes.")]
+    public ArenaContainment containment;
+
 
     [Header("Input")]
     public IShipInput input;
@@ -33,6 +35,11 @@ public class ShipController : MonoBehaviour
     public event Action OnDeath;
 
     Rigidbody _body;
+    BoxCollider _sweepHull;
+    const float Skin = 0.01f;
+    const int MaxContacts = 8;
+    readonly Vector3[] _contactNormals = new Vector3[MaxContacts];
+    int _contactCount;
     float _stepAccumulator;
 
     void Awake()
@@ -40,6 +47,11 @@ public class ShipController : MonoBehaviour
         _body = GetComponent<Rigidbody>();
         _body.isKinematic = true;   // the controller owns motion; nothing else may move us
         _body.useGravity = false;
+
+        // Query-only shape: never participates in contacts or gameplay trigger callbacks.
+        _sweepHull = gameObject.AddComponent<BoxCollider>();
+        _sweepHull.isTrigger = true;
+        _sweepHull.enabled = false;
 
         if (physics == null) physics = ShipPhysics.CreateDefault();
         if (input == null) input = new KeyboardMouseShipInput();
@@ -63,6 +75,7 @@ public class ShipController : MonoBehaviour
         angularVelocity = Vector3.zero;
         IsDead = false;
         _stepAccumulator = 0f;
+        containment?.Reset(position);
     }
 
     void FixedUpdate()
@@ -87,8 +100,22 @@ public class ShipController : MonoBehaviour
         if (physics == null || dt <= 0f) return;
         if (IsDead) inp = ShipInputState.Zero;
 
+        if (containment != null && containment.Tick(transform.position, dt))
+        {
+            velocity = Vector3.zero;
+            angularVelocity = Vector3.zero;
+            return;
+        }
+
         StepRotation(inp, dt);
         StepTranslation(inp, dt);
+
+        // Validate the result too, but advance grace/dwell clocks only once per substep.
+        if (containment != null && containment.Tick(transform.position, 0f))
+        {
+            velocity = Vector3.zero;
+            angularVelocity = Vector3.zero;
+        }
     }
 
     void StepRotation(ShipInputState inp, float dt)
@@ -127,65 +154,114 @@ public class ShipController : MonoBehaviour
     }
 
     /// <summary>
-    /// Swept move with slide response. Two layers:
-    /// 1) hard clamp inside the arena envelope, so the ship can never leave the level;
-    /// 2) a swept box against other colliders (pillars, turret), stopping at the contact
-    ///    and keeping the tangential component so the player slides instead of sticking.
+    /// Swept move with slide response. Walls are authoritative: the swept box stops at the
+    /// contact and keeps the tangential component so the player slides instead of sticking.
+    /// Arena containment is a separate safety net (see <see cref="containment"/>).
     /// </summary>
     void MoveWithSlide(Vector3 displacement)
     {
-        if (displacement.sqrMagnitude <= 1e-10f) return;
-
-        Vector3 start = transform.position;
-        Vector3 desired = start + displacement;
-
-        Vector3 clamped = new Vector3(
-            Mathf.Clamp(desired.x, -arenaHalfExtents.x + physics.radius, arenaHalfExtents.x - physics.radius),
-            Mathf.Clamp(desired.y, -arenaHalfExtents.y + physics.radius, arenaHalfExtents.y - physics.radius),
-            Mathf.Clamp(desired.z, -arenaHalfExtents.z + physics.radius, arenaHalfExtents.z - physics.radius));
-
-        if ((clamped - desired).sqrMagnitude > 1e-10f)
-            RemoveVelocityAlong((clamped - desired).normalized);
-
-        Vector3 step = clamped - start;
-        float stepLen = step.magnitude;
-        if (stepLen <= 1e-6f) return;
-
-        Vector3 dir = step / stepLen;
+        // Step is also called explicitly after arena construction/teleports. A stale
+        // broadphase can report distance-zero hits at a collider's previous pose.
+        Physics.SyncTransforms();
+        Vector3 position = transform.position;
+        Quaternion rotation = transform.rotation;
         Vector3 half = Vector3.one * physics.radius;
+        Vector3 scale = transform.lossyScale;
+        _sweepHull.size = new Vector3(2f * half.x / Mathf.Max(Mathf.Abs(scale.x), 1e-6f),
+            2f * half.y / Mathf.Max(Mathf.Abs(scale.y), 1e-6f),
+            2f * half.z / Mathf.Max(Mathf.Abs(scale.z), 1e-6f));
+        _contactCount = 0;
 
-        RaycastHit hit;
-        if (!Physics.BoxCast(start, half, dir, out hit, transform.rotation, stepLen, ~0, QueryTriggerInteraction.Ignore))
+        // A zero-distance BoxCast normal is synthetic (-direction). Recover a real
+        // minimum separation first, even when a rotation-only step has zero displacement.
+        // Unity requires an enabled shape for ComputePenetration. This synchronous
+        // query finishes and disables it before the physics scene can simulate triggers.
+        _sweepHull.enabled = true;
+        bool separated = false;
+        for (int pass = 0; pass < MaxContacts; pass++)
         {
-            transform.position = clamped;
-            return;
+            bool overlap = false;
+            foreach (var other in Physics.OverlapBox(position, half, rotation, ~0,
+                QueryTriggerInteraction.Ignore))
+            {
+                if (other.attachedRigidbody == _body || other.transform.IsChildOf(transform)) continue;
+                if (!Physics.ComputePenetration(_sweepHull, position, rotation, other,
+                    other.transform.position, other.transform.rotation, out var normal, out float depth)) continue;
+                position += normal * (depth + Skin);
+                RememberNormal(normal);
+                overlap = true;
+            }
+            if (!overlap) { separated = true; break; }
         }
+        _sweepHull.enabled = false;
 
-        // Contact centre is origin + direction * distance: unambiguous for sweeps and
-        // immune to normal-sign mistakes. Stop a hair short so the next cast starts free.
-        float travel = Mathf.Max(hit.distance - 0.01f, 0f);
-        Vector3 contactCentre = start + dir * travel;
-        Vector3 slide = step - hit.normal * Vector3.Dot(step, hit.normal);
-
-        if (slide.sqrMagnitude > 1e-8f)
+        velocity = ConstrainToContacts(velocity);
+        Vector3 remaining = ConstrainToContacts(displacement);
+        for (int pass = 0; separated && pass < MaxContacts && remaining.sqrMagnitude > 1e-10f; pass++)
         {
-            Vector3 slideDir = slide.normalized;
-            RaycastHit slideHit;
-            if (!Physics.BoxCast(contactCentre, half, slideDir, out slideHit, transform.rotation, slide.magnitude, ~0, QueryTriggerInteraction.Ignore))
-                contactCentre += slide;
+            float length = remaining.magnitude;
+            Vector3 direction = remaining / length;
+            RaycastHit nearest = default;
+            float distance = float.PositiveInfinity;
+            foreach (var hit in Physics.BoxCastAll(position, half, direction, rotation,
+                length, ~0, QueryTriggerInteraction.Ignore))
+            {
+                if (hit.collider.attachedRigidbody == _body || hit.collider.transform.IsChildOf(transform)) continue;
+                if (Vector3.Dot(direction, hit.normal) >= -1e-6f || hit.distance >= distance) continue;
+                nearest = hit;
+                distance = hit.distance;
+            }
+            if (float.IsPositiveInfinity(distance)) { position += remaining; break; }
+
+            // PHYSICS.C:875,938-946: consume moved time, remove only inward normal
+            // momentum, then sweep the remainder. No artificial tangential friction.
+            float travel = Mathf.Clamp(distance - Skin, 0f, length);
+            position += direction * travel;
+            remaining *= 1f - travel / length;
+            RememberNormal(nearest.normal);
+            remaining = ConstrainToContacts(remaining);
+            velocity = ConstrainToContacts(velocity);
         }
-
-        contactCentre.x = Mathf.Clamp(contactCentre.x, -arenaHalfExtents.x + physics.radius, arenaHalfExtents.x - physics.radius);
-        contactCentre.y = Mathf.Clamp(contactCentre.y, -arenaHalfExtents.y + physics.radius, arenaHalfExtents.y - physics.radius);
-        contactCentre.z = Mathf.Clamp(contactCentre.z, -arenaHalfExtents.z + physics.radius, arenaHalfExtents.z - physics.radius);
-
-        transform.position = contactCentre;
-        RemoveVelocityAlong(hit.normal);
-        velocity *= 0.9f;   // light impact friction; slice 1 has no bounce
+        // Exhausting the bound never applies an unswept remainder.
+        transform.position = position;
     }
 
-    void RemoveVelocityAlong(Vector3 normal)
+    void RememberNormal(Vector3 normal)
     {
-        velocity -= normal * Vector3.Dot(velocity, normal);
+        for (int i = 0; i < _contactCount; i++)
+            if (Vector3.Dot(_contactNormals[i], normal) > 0.9999f) return;
+        if (_contactCount < MaxContacts) _contactNormals[_contactCount++] = normal;
+    }
+
+    Vector3 ConstrainToContacts(Vector3 value)
+    {
+        bool feasible = true;
+        for (int i = 0; i < _contactCount; i++)
+            if (Vector3.Dot(value, _contactNormals[i]) < -1e-6f) feasible = false;
+        if (feasible) return value;
+
+        // Project onto the feasible contact cone. One plane gives a slide; two
+        // active planes give a crease. Sequential clipping alone can re-enter an
+        // earlier plane in acute corners. Three independent planes can stop motion.
+        Vector3 best = Vector3.zero;
+        float bestError = value.sqrMagnitude;
+        for (int i = 0; i < _contactCount; i++)
+        for (int j = i; j < _contactCount; j++)
+        {
+            Vector3 candidate;
+            if (i == j) candidate = Vector3.ProjectOnPlane(value, _contactNormals[i]);
+            else
+            {
+                Vector3 crease = Vector3.Cross(_contactNormals[i], _contactNormals[j]);
+                if (crease.sqrMagnitude < 1e-8f) continue;
+                candidate = crease * (Vector3.Dot(value, crease) / crease.sqrMagnitude);
+            }
+            feasible = true;
+            for (int k = 0; k < _contactCount; k++)
+                if (Vector3.Dot(candidate, _contactNormals[k]) < -1e-6f) feasible = false;
+            float error = (candidate - value).sqrMagnitude;
+            if (feasible && error < bestError) { best = candidate; bestError = error; }
+        }
+        return best;
     }
 }

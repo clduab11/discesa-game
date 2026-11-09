@@ -6,6 +6,7 @@ public class ShipCamera : MonoBehaviour
     public Transform target;
     public float distance = 6.5f;
     public float height = 2.2f;
+    public float lateralOffset = 0f;
     public float positionLerp = 8f;
     public float rotationLerp = 10f;
     public float fov = 72f;
@@ -24,7 +25,8 @@ public class ShipCamera : MonoBehaviour
 
         Vector3 desiredPos = target.position
                              - target.forward * distance
-                             + target.up * height;
+                             + target.up * height
+                             + target.right * lateralOffset;
 
         transform.position = Vector3.Lerp(transform.position, desiredPos,
             1f - Mathf.Exp(-positionLerp * Time.deltaTime));

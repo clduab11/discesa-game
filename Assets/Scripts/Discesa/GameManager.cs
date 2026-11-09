@@ -1,11 +1,16 @@
-﻿using UnityEngine;
+using UnityEngine;
 using UnityEngine.SceneManagement;
-using UnityEngine.UI;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+#endif
 
 /// <summary>
-/// Owns the win/lose/restart loop, builds the graybox arena and actors at runtime,
-/// and hosts the HUD. Self-bootstraps so pressing Play in any scene (or a build)
-/// produces a playable slice without scene wiring.
+/// Owns the slice: builds the arena, ship, cockpit camera, HUD, weapons, enemies,
+/// pickups and the core objective at runtime; runs the win/lose/restart loop.
+/// Self-bootstraps so pressing Play in any scene (or a build) produces the game.
+///
+/// Original implementation. The reference source was studied for behaviour only;
+/// no reference code, art, names, music or level data is present here.
 /// </summary>
 public class GameManager : MonoBehaviour
 {
@@ -16,8 +21,6 @@ public class GameManager : MonoBehaviour
     {
         if (Instance != null) return;
 
-        // Unity's test runner uses its own throwaway scenes; bootstrapping a full match
-        // there would run a game in the background of every PlayMode test.
         string sceneName = SceneManager.GetActiveScene().name;
         if (!string.IsNullOrEmpty(sceneName) && sceneName.Contains("InitTestScene")) return;
 
@@ -27,23 +30,37 @@ public class GameManager : MonoBehaviour
         go.AddComponent<GameManager>();
     }
 
-    public int shipMaxHp = 100;
-    public int shipHp { get; private set; }
+    // ---------------------------------------------------------------- public state
+
+    [System.NonSerialized] public ArenaLayout layout;
+    [System.NonSerialized] public ArenaContainment containment;
+    public ShipController ship;
+    public ShipStatus status;
+    public WeaponSystem weapons;
+    public ProjectilePool projectiles;
+    public Turret turret;
+    public Walker walker;
+    public CoreObjective core;
+    public Pickup cellPickup;
+    public Pickup missilePickup;
+    public CameraRig cameraRig;
+    public CockpitHud hud;
+    public PhotoDirector photoDirector;
+
     public bool IsWin { get; private set; }
     public bool IsLose { get; private set; }
 
-    public ShipController ship;
-    public Turret turret;
-    public ShipCamera shipCamera;
+    public ShipCamera shipCamera => cameraRig != null ? cameraRig.chaseBehaviour : null;
+    public int shipHp => status != null ? Mathf.CeilToInt(status.Shield) : 0;
 
-    public float fireInterval = 0.15f;
-    public int shipProjectileDamage = 15;
+    public Vector3 SpawnPosition { get; private set; }
+    public Quaternion SpawnRotation { get; private set; }
 
-    Canvas _canvas;
-    Text _hud;
-    Text _banner;
-    float _fireCooldown;
-    float _hitFlash;
+    // ---------------------------------------------------------------- private
+
+    IShipInput _rawInput;
+    LatchedShipInput _latchedInput;
+    float _flash;
 
     void Awake()
     {
@@ -54,17 +71,22 @@ public class GameManager : MonoBehaviour
         }
 
         Instance = this;
-        shipHp = shipMaxHp;
 
-        BuildArena();
-        BuildShip();
-        BuildTurret();
-        BuildCamera();
-        BuildHud();
+        layout = ArenaLayout.CreateDefault();
+        SpawnPosition = layout.ShipSpawn;
+        SpawnRotation = Quaternion.Euler(0f, 90f, 0f); // face +X down the Entry Hall
+
+        _rawInput = new KeyboardMouseShipInput();
+        _latchedInput = new LatchedShipInput();
+
+        BuildWorld();
 
         Debug.Log($"[Discesa] Ready: ship at {ship.transform.position}, " +
-                  $"turret at {turret.transform.position} ({turret.hp} hp), " +
-                  $"camera {shipCamera.name}, arena 40x20x40");
+                  $"core at {core.transform.position} ({core.MaxHp:0} hp), " +
+                  $"turret at {turret.transform.position} ({turret.MaxHp:0} hp), " +
+                  $"walker at {walker.transform.position} ({walker.MaxHp:0} hp), " +
+                  $"rooms {layout.Rooms.Count} corridors {layout.Corridors.Count} bays {layout.Bays.Count}, " +
+                  $"camera {cameraRig.ActiveCamera.name}");
     }
 
     void OnDestroy()
@@ -74,253 +96,415 @@ public class GameManager : MonoBehaviour
 
     // ---------------------------------------------------------------- build
 
-    void BuildArena()
+    void BuildWorld()
     {
-        ArenaBuilder.Build(Vector3.zero, 40f, 20f, 40f);
-        BuildTrialProp();
-    }
+        var arena = ArenaBuilder.Build(layout);
+        arena.transform.SetParent(transform, true);
 
-    /// <summary>
-    /// SimReady GLB trial prop (CC-BY-4.0, credit NVIDIA): a single white crate
-    /// as non-gameplay set dressing on the arena floor, out of the ship's spawn
-    /// lane. Gameplay collision is unchanged; the prop is visual-only.
-    /// </summary>
-    void BuildTrialProp()
-    {
-        var prop = SimReadyPropLoader.TryInstantiate();
-        if (prop != null)
-        {
-            prop.transform.position = new Vector3(0f, -9.2f, -12f);
-            prop.transform.rotation = Quaternion.Euler(0f, 35f, 0f);
-        }
-        // If the dataset file has not been downloaded, the arena stays clean.
+        var poolGo = new GameObject("Projectiles");
+        poolGo.transform.SetParent(transform, false);
+        projectiles = poolGo.AddComponent<ProjectilePool>();
+        projectiles.Build();
+
+        var vfxGo = new GameObject("Vfx");
+        vfxGo.transform.SetParent(transform, false);
+        vfxGo.AddComponent<Vfx>();
+
+        BuildShip();
+        BuildTurretAndCore();
+        BuildWalker();
+        BuildPickups();
+        BuildCameraAndHud();
+
+        var pdGo = new GameObject("PhotoDirector");
+        pdGo.transform.SetParent(transform, false);
+        photoDirector = pdGo.AddComponent<PhotoDirector>();
+        photoDirector.Bind(this);
     }
 
     void BuildShip()
     {
-        var shipGO = new GameObject("Ship");
-        shipGO.transform.SetPositionAndRotation(new Vector3(-14f, 0f, 0f), Quaternion.identity);
+        var shipGo = new GameObject("Ship");
+        shipGo.transform.SetPositionAndRotation(SpawnPosition, SpawnRotation);
+        shipGo.transform.SetParent(transform, true);
 
-        // Authored ship visual (Blender GLB). The swept kinematic controller owns
-        // collision; the imported mesh is visual-only (colliders stripped).
-        var visual = ShipVisualLoader.TryInstantiate(shipGO.transform);
+        var visual = ShipVisualLoader.TryInstantiate(shipGo.transform);
         if (visual == null)
         {
-            // Fallback graybox primitives when the GLB asset has not been imported
-            // yet (fresh checkout, or Editor not yet refreshed). Same envelope.
             var hull = GameObject.CreatePrimitive(PrimitiveType.Cube);
             hull.name = "Hull";
-            hull.transform.SetParent(shipGO.transform, false);
+            hull.transform.SetParent(shipGo.transform, false);
             hull.transform.localScale = new Vector3(0.7f, 0.45f, 1.3f);
 
             var canopy = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             canopy.name = "Canopy";
-            canopy.transform.SetParent(shipGO.transform, false);
+            canopy.transform.SetParent(shipGo.transform, false);
             canopy.transform.localPosition = new Vector3(0f, 0.16f, 0.15f);
             canopy.transform.localScale = new Vector3(0.5f, 0.4f, 0.55f);
 
-            var shipMat = DiscesaMaterials.ShipHull;
-            hull.GetComponent<Renderer>().sharedMaterial = shipMat;
-            canopy.GetComponent<Renderer>().sharedMaterial = shipMat;
+            var mat = DiscesaMaterials.ShipHull;
+            hull.GetComponent<Renderer>().sharedMaterial = mat;
+            canopy.GetComponent<Renderer>().sharedMaterial = mat;
 
-            // Child primitives would add their own colliders and fight the swept controller.
             Object.Destroy(hull.GetComponent<Collider>());
             Object.Destroy(canopy.GetComponent<Collider>());
         }
 
-        // One sphere collider so incoming projectiles can register hits. It is a trigger
-        // because the ship's own swept move must not collide with itself (casts ignore triggers).
-        var hullCollider = shipGO.AddComponent<SphereCollider>();
+        // Engine glow: an original emissive marker at the stern, used by the beauty shot.
+        var engine = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        engine.name = "EngineGlow";
+        engine.transform.SetParent(shipGo.transform, false);
+        engine.transform.localPosition = new Vector3(0f, 0f, -0.72f);
+        engine.transform.localScale = new Vector3(0.13f, 0.13f, 0.20f);
+        Object.Destroy(engine.GetComponent<Collider>());
+        engine.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.EngineGlow;
+
+        // Hood detail: original primitives that break up the flat hull top seen by the
+        // cockpit camera. Dark spine + rails + a cyan nose lamp.
+        AddHoodPart(shipGo.transform, "HoodSpine", new Vector3(0f, 0.186f, 0.22f),
+            new Vector3(0.10f, 0.025f, 0.62f), DiscesaMaterials.WallTrim);
+        AddHoodPart(shipGo.transform, "HoodRailL", new Vector3(-0.235f, 0.182f, 0.22f),
+            new Vector3(0.04f, 0.02f, 0.55f), DiscesaMaterials.WallTrim);
+        AddHoodPart(shipGo.transform, "HoodRailR", new Vector3(0.235f, 0.182f, 0.22f),
+            new Vector3(0.04f, 0.02f, 0.55f), DiscesaMaterials.WallTrim);
+        AddHoodPart(shipGo.transform, "NoseLamp", new Vector3(0f, 0.192f, 0.66f),
+            new Vector3(0.16f, 0.03f, 0.06f), DiscesaMaterials.EngineGlow);
+        AddHoodPart(shipGo.transform, "Cowl", new Vector3(0f, 0.225f, 0.02f),
+            new Vector3(0.34f, 0.07f, 0.10f), DiscesaMaterials.WallTrim);
+
+        var muzzle = new GameObject("Muzzle");
+        muzzle.transform.SetParent(shipGo.transform, false);
+        muzzle.transform.localPosition = new Vector3(0f, 0f, 1.35f);
+
+        var hullCollider = shipGo.AddComponent<SphereCollider>();
         hullCollider.radius = 0.6f;
         hullCollider.isTrigger = true;
 
-        ship = shipGO.AddComponent<ShipController>();
-        ship.arenaHalfExtents = new Vector3(20f, 10f, 20f);
-        ship.ResetShip(new Vector3(-14f, 0f, 0f), Quaternion.identity);
+        ship = shipGo.AddComponent<ShipController>();
+        ship.physics = ShipPhysics.CreateDefault();
+        ship.SetInput(_latchedInput);
+        ship.ResetShip(SpawnPosition, SpawnRotation);
+
+        containment = new ArenaContainment(layout, ship.transform, ship.physics.radius);
+        ship.containment = containment;
+        containment.Reset(SpawnPosition);
+
+        status = shipGo.AddComponent<ShipStatus>();
+        status.Died += LoseGame;
+
+        var weaponGo = new GameObject("Weapons");
+        weaponGo.transform.SetParent(shipGo.transform, false);
+        weapons = weaponGo.AddComponent<WeaponSystem>();
+        weapons.Build(ship, status, projectiles);
+        weapons.muzzle = muzzle.transform;
     }
 
-    void BuildTurret()
+    void AddHoodPart(Transform parent, string name, Vector3 localPosition, Vector3 scale, Material material)
     {
-        var turretGO = new GameObject("Turret");
-        turretGO.transform.SetPositionAndRotation(new Vector3(12f, 0f, 0f), Quaternion.identity);
+        var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        go.name = name;
+        go.transform.SetParent(parent, false);
+        go.transform.localPosition = localPosition;
+        go.transform.localScale = scale;
+        Object.Destroy(go.GetComponent<Collider>());
+        var renderer = go.GetComponent<Renderer>();
+        if (renderer != null) renderer.sharedMaterial = material;
+    }
+
+    void BuildTurretAndCore()
+    {
+        var turretGo = new GameObject("Turret");
+        turretGo.transform.position = layout.TurretAnchor;
+        // Face the corridor entrance (-X) so the guard actually covers the approach.
+        turretGo.transform.rotation = Quaternion.Euler(0f, -90f, 0f);
+        turretGo.transform.SetParent(transform, true);
+
+        // Guard pedestal so the turret reads above the console line from the approach.
+        var pedestal = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        pedestal.name = "TurretPedestal";
+        pedestal.transform.SetParent(turretGo.transform, false);
+        pedestal.transform.localPosition = new Vector3(0f, -3.2f, 0f);
+        pedestal.transform.localScale = new Vector3(3f, 6.4f, 3f);
+        pedestal.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.CoreTrim;
 
         var baseMesh = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
         baseMesh.name = "TurretBase";
-        baseMesh.transform.SetParent(turretGO.transform, false);
-        baseMesh.transform.localScale = new Vector3(1.4f, 1f, 1.4f);
+        baseMesh.transform.SetParent(turretGo.transform, false);
+        baseMesh.transform.localPosition = new Vector3(0f, 0.3f, 0f);
+        baseMesh.transform.localScale = new Vector3(1.3f, 0.3f, 1.3f);
+        Object.Destroy(baseMesh.GetComponent<Collider>());
+        baseMesh.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.Turret;
 
-        var turretMat = DiscesaMaterials.Turret;
-        baseMesh.GetComponent<Renderer>().sharedMaterial = turretMat;
+        var head = new GameObject("Head");
+        head.transform.SetParent(turretGo.transform, false);
+        head.transform.localPosition = new Vector3(0f, 0.76f, 0f);
+
+        var headBody = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        headBody.name = "HeadBody";
+        headBody.transform.SetParent(head.transform, false);
+        headBody.transform.localPosition = new Vector3(0f, 0f, 0.15f);
+        headBody.transform.localScale = new Vector3(0.9f, 0.52f, 1.05f);
+        Object.Destroy(headBody.GetComponent<Collider>());
+        headBody.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.Turret;
+
+        var barrel = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+        barrel.name = "Barrel";
+        barrel.transform.SetParent(head.transform, false);
+        barrel.transform.localPosition = new Vector3(0f, 0f, 0.82f);
+        barrel.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+        barrel.transform.localScale = new Vector3(0.18f, 0.42f, 0.18f);
+        Object.Destroy(barrel.GetComponent<Collider>());
+        barrel.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.Turret;
 
         var muzzle = new GameObject("Muzzle");
-        muzzle.transform.SetParent(turretGO.transform, false);
-        muzzle.transform.localPosition = new Vector3(0f, 0.2f, 1.1f);
+        muzzle.transform.SetParent(head.transform, false);
+        muzzle.transform.localPosition = new Vector3(0f, 0f, 1.28f);
 
-        turret = turretGO.AddComponent<Turret>();
-        turret.muzzle = muzzle.transform;
-        turret.target = ship != null ? ship.transform : null;
+        var glow = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        glow.name = "MuzzleGlow";
+        glow.transform.SetParent(muzzle.transform, false);
+        glow.transform.localPosition = Vector3.zero;
+        glow.transform.localScale = Vector3.zero;
+        Object.Destroy(glow.GetComponent<Collider>());
+        glow.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.ProjectileRed;
 
-        // Objective marker above the turret.
-        var core = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-        core.name = "ObjectiveCore";
-        core.transform.SetPositionAndRotation(turretGO.transform.position + Vector3.up * 2f, Quaternion.identity);
-        core.transform.localScale = Vector3.one * 0.6f;
-        Object.Destroy(core.GetComponent<Collider>());
+        var turretCollider = turretGo.AddComponent<BoxCollider>();
+        turretCollider.center = new Vector3(0f, 0.7f, 0f);
+        turretCollider.size = new Vector3(1.7f, 1.5f, 1.9f);
 
-        var coreMat = DiscesaMaterials.ObjectiveCore;
-        core.GetComponent<Renderer>().sharedMaterial = coreMat;
+        turret = turretGo.AddComponent<Turret>();
+        turret.muzzleGlow = glow.transform;
+        turret.Build(ship.transform, head.transform, muzzle.transform, projectiles);
 
-        _objectiveCore = core.transform;
+        // ---- core
+        var coreGo = new GameObject("Core");
+        coreGo.transform.position = layout.CoreAnchor;
+        coreGo.transform.SetParent(transform, true);
+
+        var visual = new GameObject("CoreVisual");
+        visual.transform.SetParent(coreGo.transform, false);
+
+        var sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+        sphere.name = "CoreSphere";
+        sphere.transform.SetParent(visual.transform, false);
+        sphere.transform.localScale = Vector3.one * 1.05f;
+        Object.Destroy(sphere.GetComponent<Collider>());
+        sphere.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.CoreReactor;
+
+        for (int i = 0; i < 2; i++)
+        {
+            var ring = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            ring.name = "CoreRing" + i;
+            ring.transform.SetParent(visual.transform, false);
+            ring.transform.localRotation = Quaternion.Euler(i == 0 ? 0f : 90f, 0f, i == 0 ? 24f : -24f);
+            ring.transform.localScale = new Vector3(1.55f, 0.045f, 1.55f);
+            Object.Destroy(ring.GetComponent<Collider>());
+            ring.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.CoreTrim;
+        }
+
+        var coreCollider = coreGo.AddComponent<BoxCollider>();
+        coreCollider.size = Vector3.one * 1.7f;
+
+        core = coreGo.AddComponent<CoreObjective>();
+        core.Build(visual.transform);
+        core.Destroyed += OnCoreDestroyed;
+
+        var coreLightGo = new GameObject("CoreLight");
+        coreLightGo.transform.SetParent(coreGo.transform, false);
+        var coreLight = coreLightGo.AddComponent<Light>();
+        coreLight.type = LightType.Point;
+        coreLight.color = new Color(0.25f, 0.85f, 1f);
+        coreLight.range = 14f;
+        coreLight.intensity = 9f;
+        coreLight.shadows = LightShadows.None;
     }
 
-    Transform _objectiveCore;
-
-    void BuildCamera()
+    void BuildWalker()
     {
-        // Reuse the scene camera when one exists (avoids a second AudioListener and a
-        // duplicate render), otherwise create one so an empty scene is still playable.
-        Camera cam = Object.FindAnyObjectByType<Camera>();
-        GameObject camGO;
+        var walkerGo = new GameObject("Walker");
+        walkerGo.transform.position = layout.WalkerAnchor;
+        walkerGo.transform.SetParent(transform, true);
 
-        if (cam != null)
+        var body = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        body.name = "Body";
+        body.transform.SetParent(walkerGo.transform, false);
+        body.transform.localPosition = new Vector3(0f, 0.95f, 0f);
+        body.transform.localScale = new Vector3(0.9f, 1.05f, 1.2f);
+        Object.Destroy(body.GetComponent<Collider>());
+        body.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.WalkerBody;
+
+        var head = GameObject.CreatePrimitive(PrimitiveType.Cube);
+        head.name = "Head";
+        head.transform.SetParent(walkerGo.transform, false);
+        head.transform.localPosition = new Vector3(0f, 1.65f, 0.25f);
+        head.transform.localScale = new Vector3(0.55f, 0.42f, 0.55f);
+        Object.Destroy(head.GetComponent<Collider>());
+        head.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.Turret;
+
+        for (int i = 0; i < 4; i++)
         {
-            camGO = cam.gameObject;
+            var leg = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            leg.name = "Leg" + i;
+            leg.transform.SetParent(walkerGo.transform, false);
+            float sx = (i % 2 == 0) ? -1f : 1f;
+            float sz = (i < 2) ? 0.3f : -0.3f;
+            leg.transform.localPosition = new Vector3(sx * 0.42f, 0.38f, sz);
+            leg.transform.localScale = new Vector3(0.16f, 0.76f, 0.16f);
+            Object.Destroy(leg.GetComponent<Collider>());
+            leg.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.WalkerBody;
+        }
+
+        var capsule = walkerGo.AddComponent<CapsuleCollider>();
+        capsule.center = new Vector3(0f, 0.95f, 0f);
+        capsule.height = 1.9f;
+        capsule.radius = 0.6f;
+
+        walker = walkerGo.AddComponent<Walker>();
+        walker.Build(ship.transform, layout.WalkerWaypoints, -5.3f);
+    }
+
+    void BuildPickups()
+    {
+        cellPickup = MakePickup(Pickup.Kind.Cell, layout.CellPickupAnchor);
+        missilePickup = MakePickup(Pickup.Kind.Missile, layout.MissilePickupAnchor);
+    }
+
+    /// <summary>Photo poses freeze enemy AI so captures are deterministic.</summary>
+    public void SetEnemyAi(bool active)
+    {
+        if (turret != null) turret.enabled = active;
+        if (walker != null) walker.enabled = active;
+    }
+
+    Pickup MakePickup(Pickup.Kind kind, Vector3 anchor)
+    {
+        var go = new GameObject(kind + "Pickup");
+        go.transform.position = anchor;
+        go.transform.SetParent(transform, true);
+
+        var visual = new GameObject("Visual");
+        visual.transform.SetParent(go.transform, false);
+
+        if (kind == Pickup.Kind.Cell)
+        {
+            var body = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            body.name = "CellCore";
+            body.transform.SetParent(visual.transform, false);
+            body.transform.localRotation = Quaternion.Euler(45f, 0f, 45f);
+            body.transform.localScale = Vector3.one * 0.55f;
+            Object.Destroy(body.GetComponent<Collider>());
+            body.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.PickupCell;
+
+            var ring = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
+            ring.name = "CellRing";
+            ring.transform.SetParent(visual.transform, false);
+            ring.transform.localRotation = Quaternion.Euler(0f, 0f, 90f);
+            ring.transform.localScale = new Vector3(0.72f, 0.03f, 0.72f);
+            Object.Destroy(ring.GetComponent<Collider>());
+            ring.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.PropMetal;
         }
         else
         {
-            camGO = new GameObject("ShipCamera");
-            cam = camGO.AddComponent<Camera>();
-            camGO.tag = "MainCamera";
+            var body = GameObject.CreatePrimitive(PrimitiveType.Capsule);
+            body.name = "MissileBody";
+            body.transform.SetParent(visual.transform, false);
+            body.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
+            body.transform.localScale = new Vector3(0.22f, 0.36f, 0.22f);
+            Object.Destroy(body.GetComponent<Collider>());
+            body.GetComponent<Renderer>().sharedMaterial = DiscesaMaterials.PickupMissile;
         }
 
-        cam.nearClipPlane = 0.1f;
-        cam.farClipPlane = 500f;
+        var lightGo = new GameObject("Glow");
+        lightGo.transform.SetParent(go.transform, false);
+        var light = lightGo.AddComponent<Light>();
+        light.type = LightType.Point;
+        light.color = kind == Pickup.Kind.Cell ? new Color(0.35f, 1f, 0.65f) : new Color(1f, 0.66f, 0.22f);
+        light.range = 6f;
+        light.intensity = 2f;
+        light.shadows = LightShadows.None;
 
-        if (camGO.GetComponent<AudioListener>() == null)
-            camGO.AddComponent<AudioListener>();
+        var sphere = go.AddComponent<SphereCollider>();
+        sphere.radius = 0.55f;
+        sphere.isTrigger = true;
 
-        shipCamera = camGO.GetComponent<ShipCamera>();
-        if (shipCamera == null) shipCamera = camGO.AddComponent<ShipCamera>();
-        shipCamera.target = ship != null ? ship.transform : null;
-
-        camGO.transform.position = ship != null
-            ? ship.transform.position - ship.transform.forward * 6.5f + Vector3.up * 2.2f
-            : new Vector3(-20f, 2f, 0f);
-        camGO.transform.LookAt(ship != null ? ship.transform.position : Vector3.zero);
+        var pickup = go.AddComponent<Pickup>();
+        pickup.Build(kind, status, ship.transform, anchor, visual.transform, light);
+        return pickup;
     }
 
-    void BuildHud()
+    void BuildCameraAndHud()
     {
-        var canvasGO = new GameObject("Canvas");
-        _canvas = canvasGO.AddComponent<Canvas>();
-        _canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        canvasGO.AddComponent<CanvasScaler>();
-        canvasGO.AddComponent<GraphicRaycaster>();
+        var rigGo = new GameObject("CameraRig");
+        rigGo.transform.SetParent(transform, false);
+        cameraRig = rigGo.AddComponent<CameraRig>();
+        cameraRig.Build(ship);
 
-        var font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
-
-        _hud = new GameObject("HUDText").AddComponent<Text>();
-        _hud.transform.SetParent(canvasGO.transform, false);
-        _hud.font = font;
-        _hud.fontSize = 18;
-        _hud.alignment = TextAnchor.UpperLeft;
-        _hud.color = Color.white;
-        var hudRt = _hud.rectTransform;
-        hudRt.anchorMin = new Vector2(0f, 1f);
-        hudRt.anchorMax = new Vector2(0f, 1f);
-        hudRt.pivot = new Vector2(0f, 1f);
-        hudRt.anchoredPosition = new Vector2(20f, -20f);
-        hudRt.sizeDelta = new Vector2(560f, 220f);
-
-        _banner = new GameObject("Banner").AddComponent<Text>();
-        _banner.transform.SetParent(canvasGO.transform, false);
-        _banner.font = font;
-        _banner.fontSize = 34;
-        _banner.alignment = TextAnchor.MiddleCenter;
-        _banner.color = Color.white;
-        var bannerRt = _banner.rectTransform;
-        bannerRt.anchorMin = Vector2.zero;
-        bannerRt.anchorMax = Vector2.one;
-        bannerRt.offsetMin = Vector2.zero;
-        bannerRt.offsetMax = Vector2.zero;
-        _banner.text = string.Empty;
-
-        var crosshair = new GameObject("Crosshair").AddComponent<Text>();
-        crosshair.transform.SetParent(canvasGO.transform, false);
-        crosshair.font = font;
-        crosshair.fontSize = 20;
-        crosshair.alignment = TextAnchor.MiddleCenter;
-        crosshair.color = new Color(1f, 1f, 1f, 0.85f);
-        crosshair.text = "+";
-        var crossRt = crosshair.rectTransform;
-        crossRt.anchorMin = new Vector2(0.5f, 0.5f);
-        crossRt.anchorMax = new Vector2(0.5f, 0.5f);
-        crossRt.sizeDelta = new Vector2(40f, 40f);
-        crossRt.anchoredPosition = Vector2.zero;
+        var hudGo = new GameObject("HUD");
+        hudGo.transform.SetParent(transform, false);
+        hud = hudGo.AddComponent<CockpitHud>();
+        hud.Build();
     }
 
     // ---------------------------------------------------------------- loop
 
     void Update()
     {
-        if (RestartPressed()) Restart();
-        if (_hitFlash > 0f) _hitFlash -= Time.deltaTime;
+        if (_rawInput == null) return; // duplicate/partially constructed instance awaiting Destroy
 
-        if (IsWin || IsLose || ship == null || ship.IsDead) return;
+        float dt = Time.deltaTime;
 
-        _fireCooldown -= Time.deltaTime;
-        var input = ship.input;
-        if (input == null) return;
+        // One hardware sample per frame; ShipController's fixed substeps replay it.
+        var raw = _rawInput.Sample(dt);
+        _latchedInput.Latch(raw);
 
-        var state = input.Sample(Time.deltaTime);
-        if (state.Fire && _fireCooldown <= 0f)
-        {
-            FireShipWeapon();
-            _fireCooldown = fireInterval;
-        }
+        HandleGlobalKeys();
+
+        if (_flash > 0f) _flash = Mathf.Max(0f, _flash - dt * 2.2f);
+
+        if (IsWin || IsLose || ship == null || ship.IsDead || weapons == null) return;
+
+        if (raw.Fire) weapons.TryFire();
     }
 
     void LateUpdate()
     {
-        if (_objectiveCore != null)
-            _objectiveCore.Rotate(Vector3.up, 90f * Time.deltaTime, Space.World);
-
-        UpdateHud();
+        if (hud != null && status != null)
+            hud.Render(HudModel.From(status, core, IsWin, IsLose, _flash));
     }
 
-    bool RestartPressed()
+    void HandleGlobalKeys()
     {
 #if ENABLE_INPUT_SYSTEM
-        var kb = UnityEngine.InputSystem.Keyboard.current;
-        return kb != null && kb.rKey.wasPressedThisFrame;
-#else
-        return false;
+        var kb = Keyboard.current;
+        if (kb == null) return;
+
+        if (kb.rKey.wasPressedThisFrame) Restart();
+        if (kb.vKey.wasPressedThisFrame && cameraRig != null) cameraRig.Toggle();
+        if (weapons != null)
+        {
+            if (kb.digit1Key.wasPressedThisFrame) weapons.Select(0);
+            if (kb.digit2Key.wasPressedThisFrame) weapons.Select(1);
+            if (kb.digit3Key.wasPressedThisFrame) weapons.Select(2);
+            if (kb.tabKey.wasPressedThisFrame) weapons.Cycle();
+        }
 #endif
     }
 
-    void FireShipWeapon()
-    {
-        if (ship == null) return;
-        Vector3 origin = ship.transform.position + ship.transform.forward * 1.3f;
-        Projectile.Spawn(origin, ship.transform.rotation,
-            ship.transform.forward * 70f + ship.velocity * 0.5f,
-            DiscesaMaterials.ProjectileGreen, shipProjectileDamage);
-    }
+    // ---------------------------------------------------------------- outcomes
 
     public void DamageShip(int amount)
     {
-        if (IsWin || IsLose) return;
-        shipHp = Mathf.Max(shipHp - amount, 0);
-        _hitFlash = 0.15f;
-        if (shipHp <= 0) LoseGame();
+        if (IsWin || IsLose || status == null) return;
+        status.Damage(amount);
+        _flash = 0.6f;
+        if (status.IsDead) LoseGame();
     }
 
-    public void OnTurretKilled()
+    public void OnCoreDestroyed(CoreObjective _)
     {
         if (IsWin || IsLose) return;
         IsWin = true;
-        _banner.text = "CORE DESTROYED\nPress R to restart";
-        _banner.color = new Color(0.4f, 1f, 0.6f);
+        if (turret != null) turret.DisableGuard();
     }
 
     public void LoseGame()
@@ -328,37 +512,33 @@ public class GameManager : MonoBehaviour
         if (IsWin || IsLose) return;
         IsLose = true;
         if (ship != null) ship.Kill();
-        _banner.text = "SHIP DESTROYED\nPress R to restart";
-        _banner.color = new Color(1f, 0.45f, 0.4f);
     }
 
     public void Restart()
     {
-        shipHp = shipMaxHp;
         IsWin = false;
         IsLose = false;
-        _banner.text = string.Empty;
-        _hitFlash = 0f;
-        _fireCooldown = 0f;
+        _flash = 0f;
 
-        if (ship != null) ship.ResetShip(new Vector3(-14f, 0f, 0f), Quaternion.identity);
+        if (status != null) status.ResetStatus();
+        if (ship != null) ship.ResetShip(SpawnPosition, SpawnRotation);
+        if (containment != null) containment.Reset(SpawnPosition);
+        if (projectiles != null) projectiles.ReleaseAll();
         if (turret != null) turret.ResetTurret();
+        if (walker != null) walker.ResetWalker();
+        if (core != null) core.ResetCore();
+        if (cellPickup != null) cellPickup.ResetPickup();
+        if (missilePickup != null) missilePickup.ResetPickup();
+        if (cameraRig != null) cameraRig.SetCockpit(true);
+        ClearTransientVfx();
     }
 
-    void UpdateHud()
+    public void FlashDamage(float amount) => _flash = Mathf.Clamp01(amount);
+
+    public void HudMessage(string message)
     {
-        if (_hud == null || ship == null) return;
-
-        int turretHp = turret != null ? turret.hp : 0;
-        string objective = IsWin ? "Objective: complete" : "Objective: destroy the red core";
-        string speed = ship.velocity.magnitude.ToString("F1");
-
-        _hud.text =
-            $"HULL {shipHp}/{shipMaxHp}    CORE {turretHp}\n" +
-            $"SPEED {speed} m/s\n" +
-            objective + "\n" +
-            "I/K thrust  J/L strafe  PageUp/Down lift\n" +
-            "W/S pitch  A/D yaw  Q/E roll  Space fire  R restart";
-        _hud.color = _hitFlash > 0f ? new Color(1f, 0.5f, 0.5f) : Color.white;
+        if (hud != null) hud.ShowPickup(message);
     }
+
+    public void ClearTransientVfx() => Vfx.Clear();
 }

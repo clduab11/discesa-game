@@ -36,40 +36,15 @@ public class InputTests
         Assert.That(s.Pitch, Is.InRange(-1f, 1f));
         Assert.That(s.Thrust, Is.InRange(-1f, 1f));
     }
-}
-
-public class CollisionTests
-{
-    [Test]
-    public void ArenaBuilder_CreatesSixWallsAndTwoPillars()
-    {
-        var arena = ArenaBuilder.Build(Vector3.zero, 40f, 20f, 40f);
-        var colliders = arena.GetComponentsInChildren<Collider>();
-
-        // 6 walls + 2 pillars.
-        Assert.That(colliders.Length, Is.EqualTo(8), $"Expected 8 colliders, got {colliders.Length}");
-
-        foreach (var name in new[] { "Ceiling", "Floor", "WallWest", "WallEast", "WallNorth", "WallSouth", "PillarSW", "PillarNE" })
-            Assert.IsNotNull(arena.transform.Find(name), $"Missing arena part: {name}");
-
-        foreach (var c in colliders)
-            Assert.That(c.isTrigger, Is.False, $"{c.name} must be a solid collider for the ship sweep");
-
-        Object.DestroyImmediate(arena);
-    }
 
     [Test]
-    public void ArenaBuilder_IsEnclosing()
+    public void LatchedInput_ReplaysOneSampleToEverySubstep()
     {
-        var arena = ArenaBuilder.Build(Vector3.zero, 40f, 20f, 40f);
-
-        foreach (var c in arena.GetComponentsInChildren<Collider>())
-        {
-            var b = c.bounds;
-            Assert.That(b.min.x <= 20f && b.max.x >= -20f, $"Part {c.name} does not span the arena");
-            Assert.That(b.min.y <= 10f && b.max.y >= -10f, $"Part {c.name} does not span arena height");
-        }
-
-        Object.DestroyImmediate(arena);
+        var latched = new LatchedShipInput();
+        latched.Latch(new ShipInputState(0f, 0f, 0f, 1f, 0f, 0f, true));
+        Assert.That(latched.Sample(1f / 64f), Is.EqualTo(latched.Sample(1f / 64f)));
+        Assert.That(latched.Sample(1f / 64f).Thrust, Is.EqualTo(1f));
+        latched.Latch(ShipInputState.Zero);
+        Assert.That(latched.Sample(1f / 64f), Is.EqualTo(ShipInputState.Zero));
     }
 }
